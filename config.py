@@ -3,6 +3,9 @@ Configuration and constants for the Pixel 10 Pro Google One Gemini Bot.
 """
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -37,25 +40,57 @@ USER_AGENT_TEMPLATES = [
 GMAIL_LOGIN_URL = "https://accounts.google.com/signin/v2/identifier"
 GOOGLE_ONE_URL = "https://one.google.com/"
 GOOGLE_ONE_OFFERS_URL = "https://one.google.com/about/plans"
+GOOGLE_ONE_BENEFITS_URL = "https://one.google.com/benefits"
+GOOGLE_ONE_EXPLORE_URL = "https://one.google.com/explore-plan/gemini-advanced"
+GOOGLE_ONE_HOME_URL = "https://one.google.com/home"
 
-# ── Gemini offer detection keywords ──────────────────────────────────────────
+# URLs to scan for the free Pixel offer (in order of priority)
+# The offer is found via: Google One → Profile → Settings
+GOOGLE_ONE_SCAN_URLS = [
+    "https://one.google.com/settings",
+    "https://one.google.com/offer",
+    "https://one.google.com/",
+    "https://one.google.com/home",
+    "https://one.google.com/benefits",
+    "https://one.google.com/explore-plan/gemini-advanced",
+    "https://one.google.com/about/plans",
+]
+
+# ── FREE Pixel offer detection keywords ──────────────────────────────────────
+# These keywords identify the FREE 12-month Pixel-exclusive offer
+FREE_OFFER_KEYWORDS = [
+    "free",
+    "no charge",
+    "$0",
+    "included",
+    "at no cost",
+    "complimentary",
+    "pixel",
+    "on us",
+]
+
+# General Gemini offer keywords (used alongside free keywords)
 GEMINI_OFFER_KEYWORDS = [
     "gemini pro",
     "gemini advanced",
+    "google ai premium",
+    "google one ai premium",
+    "ai premium",
     "12 month",
     "12-month",
-    "free trial",
-    "activate",
-    "get started",
-    "claim offer",
-    "redeem",
+    "1 year",
 ]
 
-# ── Selenium / WebDriver ──────────────────────────────────────────────────────
-WEBDRIVER_TIMEOUT = 30          # seconds – explicit wait
-IMPLICIT_WAIT = 10              # seconds
-PAGE_LOAD_TIMEOUT = 60          # seconds
-HEADLESS = True                 # always headless on Replit
+# URLs to EXCLUDE (support pages, not actual offer links)
+EXCLUDED_URL_PATTERNS = [
+    "support.google.com",
+    "help.google.com",
+    "policies.google.com",
+    "play.google.com/about",
+]
+
+# ── HTTP request settings ─────────────────────────────────────────────────────
+REQUEST_TIMEOUT = 30            # seconds
 
 # ── Session storage ───────────────────────────────────────────────────────────
 # In-memory dict keyed by Telegram chat_id.

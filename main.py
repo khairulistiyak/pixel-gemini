@@ -25,14 +25,18 @@ from telegram.ext import (
 
 import config
 from device_simulator import create_device_profile
-from google_automation import GoogleAutomationError, check_gemini_offer
+from google_automation import (
+    GoogleAutomationError,
+    check_gemini_offer,
+    setup_trusted_device,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=config.LOG_LEVEL, format=config.LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 # ── Conversation states ───────────────────────────────────────────────────────
-AWAIT_EMAIL, AWAIT_PASSWORD = range(2)
+AWAIT_EMAIL, AWAIT_PASSWORD, AWAIT_2FA = range(3)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -49,18 +53,23 @@ def _get_session(chat_id: int) -> dict:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send welcome message with command menu."""
     await update.message.reply_text(
-        "🤖 *Pixel 10 Pro Google One Bot*\n\n"
+        "🤖 <b>Pixel 10 Pro Google One Bot</b>\n\n"
         "This bot simulates a Google Pixel 10 Pro (Android 16) device, "
-        "logs into your Google account, and retrieves the *12-month free "
-        "Gemini Pro* offer link from Google One.\n\n"
-        "📋 *Available Commands:*\n"
+        "logs into your Google account, and retrieves the <b>12-month free "
+        "Gemini Pro</b> offer link from Google One.\n\n"
+        "📋 <b>Available Commands:</b>\n"
         "• /login – Enter your Gmail credentials\n"
-        "• /check\\_offer – Detect the Gemini Pro offer\n"
-        "• /get\\_link – Show the last captured offer link\n"
-        "• /status – View current session & device info\n\n"
-        "⚠️ *Privacy Note:* Credentials are held in memory only for the "
-        "duration of the session and never stored persistently.",
-        parse_mode="Markdown",
+        "• /setup – ⚠️ FIRST TIME: Trust this device with Google\n"
+        "• /check_offer – Detect the Gemini Pro offer\n"
+        "• /get_link – Show the last captured offer link\n"
+        "• /status – View current session &amp; device info\n\n"
+        "🔐 <b>First time setup:</b>\n"
+        "1️⃣ /login – Enter email, password, 2FA secret\n"
+        "2️⃣ /setup – A Chrome window will open on your PC.\n"
+        "    Complete Google verification manually.\n"
+        "3️⃣ /check_offer – Now the bot can log in automatically!\n\n"
+        "⚠️ <b>Privacy Note:</b> Credentials are held in memory only.",
+        parse_mode="HTML",
     )
 
 
@@ -90,29 +99,90 @@ async def login_email(update: Update,
 
 async def login_password(update: Update,
                          context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Store credentials, generate a new device profile, and finish."""
-    chat_id = update.effective_chat.id
-    password = update.message.text.strip()
-    email = context.user_data.pop("pending_email", "")
-
-    session = _get_session(chat_id)
-    session["email"] = email
-    session["password"] = password
-    session["device"] = create_device_profile()
-    session["offer_link"] = None
-
+    """Store the password and ask for 2FA secret."""
     # Delete the message containing the password for security
+    password = update.message.text.strip()
     try:
         await update.message.delete()
     except Exception:
         pass
 
+    context.user_data["pending_password"] = password
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            "✅ Password received (message deleted for security).\n\n"
+            "🔑 *Now enter your 2FA TOTP Secret Key:*\n\n"
+            "This is the secret key you received when setting up "
+            "Google Authenticator (usually a 16-32 character code "
+            "like `JBSWY3DPEHPK3PXP`).\n\n"
+            "💡 _You can find this in your Google Account → Security → "
+            "2-Step Verification → Authenticator app → Change phone → "
+            "'Can't scan it?' to see the secret key._\n\n"
+            "Type /skip if 2FA is not enabled on this account."
+        ),
+        parse_mode="Markdown",
+    )
+    return AWAIT_2FA
+
+
+async def login_2fa(update: Update,
+                    context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Store 2FA secret, generate device profile, and finish login."""
+    chat_id = update.effective_chat.id
+    totp_secret = update.message.text.strip()
+
+    # Delete the message containing the 2FA secret for security
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    email = context.user_data.pop("pending_email", "")
+    password = context.user_data.pop("pending_password", "")
+
+    session = _get_session(chat_id)
+    session["email"] = email
+    session["password"] = password
+    session["totp_secret"] = totp_secret
+    session["device"] = create_device_profile()
+    session["offer_link"] = None
+
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            "✅ *Credentials saved* and a new Pixel 10 Pro device profile has "
-            "been created for this session.\n\n"
+            "✅ *All credentials saved!* A new Pixel 10 Pro device profile "
+            "has been created.\n\n"
             + session["device"].summary()
+            + "\n\n🔐 2FA: ✅ Enabled"
+            + "\n\nUse /check\\_offer to search for the Gemini Pro offer."
+        ),
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+async def login_skip_2fa(update: Update,
+                         context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Skip 2FA and finish login without TOTP secret."""
+    chat_id = update.effective_chat.id
+    email = context.user_data.pop("pending_email", "")
+    password = context.user_data.pop("pending_password", "")
+
+    session = _get_session(chat_id)
+    session["email"] = email
+    session["password"] = password
+    session["totp_secret"] = None
+    session["device"] = create_device_profile()
+    session["offer_link"] = None
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "✅ *Credentials saved* (without 2FA). A new Pixel 10 Pro device "
+            "profile has been created.\n\n"
+            + session["device"].summary()
+            + "\n\n🔐 2FA: ❌ Skipped"
             + "\n\nUse /check\\_offer to search for the Gemini Pro offer."
         ),
         parse_mode="Markdown",
@@ -124,11 +194,78 @@ async def login_cancel(update: Update,
                        context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel the login conversation."""
     context.user_data.pop("pending_email", None)
+    context.user_data.pop("pending_password", None)
     await update.message.reply_text(
         "❌ Login cancelled.",
         reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
+
+
+# ── /setup (trusted device) ──────────────────────────────────────────────────
+
+async def setup_device(update: Update,
+                       context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Open a visible Chrome window for the user to manually log in
+    and trust the device. This bypasses Google's extra verification.
+    """
+    chat_id = update.effective_chat.id
+    session = _get_session(chat_id)
+
+    if not session.get("email") or not session.get("password"):
+        await update.message.reply_text(
+            "⚠️ No credentials found. Please use /login first."
+        )
+        return
+
+    device = session.get("device")
+    if not device:
+        device = create_device_profile()
+        session["device"] = device
+
+    await update.message.reply_text(
+        "🖥️ <b>Device Trust Setup</b>\n\n"
+        "A Chrome window will open on your PC.\n"
+        "The bot will auto-fill your email, password, and 2FA code.\n\n"
+        "👉 <b>You need to:</b>\n"
+        "1. Complete any extra Google verification (SMS code, etc.)\n"
+        "2. If Google asks 'Trust this device?' — click <b>Yes</b>\n"
+        "3. Wait for the bot to confirm success\n\n"
+        "⏳ You have 2 minutes to complete the verification.\n"
+        "The browser will close automatically after.",
+        parse_mode="HTML",
+    )
+
+    try:
+        success = setup_trusted_device(
+            session["email"],
+            session["password"],
+            device,
+            totp_secret=session.get("totp_secret"),
+            chat_id=chat_id,
+        )
+
+        if success:
+            await update.message.reply_text(
+                "✅ <b>Device trusted successfully!</b>\n\n"
+                "Google now recognizes this as a trusted device.\n"
+                "You can now use /check_offer — it will log in "
+                "without extra verification! 🎉",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text(
+                "❌ <b>Setup timed out.</b>\n\n"
+                "You didn't complete the verification in time.\n"
+                "Try again with /setup.",
+                parse_mode="HTML",
+            )
+    except Exception as exc:
+        logger.exception("Error in setup_device for chat %s", chat_id)
+        await update.message.reply_text(
+            f"❌ Error during setup: {exc}"
+        )
 
 
 # ── /check_offer ──────────────────────────────────────────────────────────────
@@ -160,9 +297,14 @@ async def check_offer(update: Update,
             session["email"],
             session["password"],
             device,
+            totp_secret=session.get("totp_secret"),
+            chat_id=chat_id,
         )
     except GoogleAutomationError as exc:
-        await update.message.reply_text(f"❌ *Error:* {exc}", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"❌ <b>Error:</b>\n{exc}",
+            parse_mode="HTML",
+        )
         return
     except Exception as exc:
         logger.exception("Unexpected error in check_offer for chat %s", chat_id)
@@ -174,11 +316,11 @@ async def check_offer(update: Update,
     if offer_link:
         session["offer_link"] = offer_link
         await update.message.reply_text(
-            "🎉 *Gemini Pro Offer Found!*\n\n"
+            "🎉 <b>Gemini Pro Offer Found!</b>\n\n"
             "Click the link below to activate your 12-month free Gemini Pro:\n\n"
             f"🔗 {offer_link}\n\n"
-            "_Use /get\\_link to retrieve this link again._",
-            parse_mode="Markdown",
+            "<i>Use /get_link to retrieve this link again.</i>",
+            parse_mode="HTML",
         )
     else:
         await update.message.reply_text(
@@ -200,14 +342,13 @@ async def get_link(update: Update,
 
     if link:
         await update.message.reply_text(
-            f"🔗 *Last captured offer link:*\n\n{link}",
-            parse_mode="Markdown",
+            f"🔗 <b>Last captured offer link:</b>\n\n{link}",
+            parse_mode="HTML",
         )
     else:
         await update.message.reply_text(
             "ℹ️ No offer link has been captured yet. "
-            "Use /check\\_offer to search for the Gemini Pro offer.",
-            parse_mode="Markdown",
+            "Use /check_offer to search for the Gemini Pro offer."
         )
 
 
@@ -227,6 +368,7 @@ async def status(update: Update,
 
     email = session.get("email", "—")
     has_creds = bool(session.get("email") and session.get("password"))
+    has_2fa = bool(session.get("totp_secret"))
     offer_link = session.get("offer_link")
     device = session.get("device")
 
@@ -234,6 +376,7 @@ async def status(update: Update,
         "📊 *Session Status*\n",
         f"Account: `{email}`",
         f"Credentials loaded: {'✅' if has_creds else '❌'}",
+        f"2FA enabled: {'✅' if has_2fa else '❌'}",
         f"Offer link captured: {'✅' if offer_link else '❌'}",
     ]
 
@@ -269,12 +412,17 @@ def main() -> None:
             AWAIT_PASSWORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)
             ],
+            AWAIT_2FA: [
+                CommandHandler("skip", login_skip_2fa),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, login_2fa),
+            ],
         },
         fallbacks=[CommandHandler("cancel", login_cancel)],
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(login_conv)
+    app.add_handler(CommandHandler("setup", setup_device))
     app.add_handler(CommandHandler("check_offer", check_offer))
     app.add_handler(CommandHandler("get_link", get_link))
     app.add_handler(CommandHandler("status", status))

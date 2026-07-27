@@ -28,9 +28,9 @@ pixel-gemini/
 |---|---|
 | 📱 Device simulation | Pixel 10 Pro (Android 16) with unique IMEI, Android ID, and user-agent per session |
 | 🤖 Telegram bot | `/start`, `/login`, `/check_offer`, `/get_link`, `/status` commands |
-| 🔐 Gmail login | Selenium-based Google account authentication |
+| 🔐 Gmail login + 2FA | Selenium-based Google account authentication with TOTP 2-Step Verification support |
 | 💳 Offer detection | Scans Google One for the 12-month Gemini Pro offer and extracts the activation link |
-| 🔄 Session management | In-memory per-user sessions; passwords deleted from chat on capture |
+| 🔄 Session management | In-memory per-user sessions; passwords & 2FA secrets deleted from chat on capture |
 
 ---
 
@@ -98,7 +98,10 @@ You: user@gmail.com
 Bot: Email received. Now enter your password:
 
 You: ••••••••
-Bot: ✅ Credentials saved. New Pixel 10 Pro device profile created…
+Bot: ✅ Password received. Now enter your 2FA TOTP Secret Key:
+
+You: JBSWY3DPEHPK3PXP
+Bot: ✅ All credentials saved! 🔐 2FA: ✅ Enabled
 
 You: /check_offer
 Bot: ⏳ Launching device simulator…
@@ -134,3 +137,5 @@ Bot: 🎉 Gemini Pro Offer Found! 🔗 https://one.google.com/…
 This project is provided for educational and personal use only.
 Automating Google account access may violate Google's Terms of Service.
 Use responsibly and only with accounts you own.
+
+# gemini_pro

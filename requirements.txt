@@ -1,8 +1,17 @@
 # Core bot framework
 python-telegram-bot==21.3
 
-# Browser automation
+# Browser automation (for login only)
 selenium==4.21.0
 
-# WebDriver management (auto-downloads matching chromedriver)
-webdriver-manager==4.0.1
+# HTTP requests (for offer scanning)
+requests>=2.31.0
+
+# Google Android device authentication (optional)
+gpsoauth==1.0.4
+
+# Environment variable management
+python-dotenv==1.0.1
+
+# TOTP 2FA code generation
+pyotp==2.9.0

@@ -1,41 +1,83 @@
 """
-Google One automation using Selenium.
+Google One Pixel offer detection – Hybrid approach.
 
-Logs into a Gmail account, navigates to Google One, detects the
-12-month free Gemini Pro offer, and returns the activation / payment link.
+1. /setup — Opens a VISIBLE Chrome window for manual Google login.
+   Saves cookies to a persistent profile. Only needs to be done ONCE.
+
+2. /check_offer — Uses saved cookies to browse Google One pages
+   and find the unique Pixel offer link (one.google.com/offer/UNIQUE_CODE).
+   Falls back to Selenium if cookies are expired.
+
+No Android emulator needed.
 """
 
+import json
 import logging
-import time
+import os
 import re
-from urllib.parse import urlparse
+import shutil
+import time
 from typing import Optional
+from urllib.parse import urlparse
+
+import pyotp
+import requests
 
 from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     NoSuchElementException,
     TimeoutException,
     WebDriverException,
 )
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
 
 import config
 from device_simulator import DeviceProfile
 
 logger = logging.getLogger(__name__)
 
+# ── Paths ────────────────────────────────────────────────────────────────────
 
-# ── Driver factory ────────────────────────────────────────────────────────────
+BASE_DIR = os.path.dirname(__file__)
+CHROME_PROFILES_DIR = os.path.join(BASE_DIR, "chrome_profiles")
+COOKIES_DIR = os.path.join(BASE_DIR, "saved_cookies")
+DEBUG_DIR = os.path.join(BASE_DIR, "debug_logs")
 
-def _build_driver(profile: DeviceProfile) -> webdriver.Chrome:
-    """Return a headless Chrome WebDriver configured for the device profile."""
+
+def _save_debug(name: str, content: str) -> None:
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    path = os.path.join(DEBUG_DIR, f"{name}.txt")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content[:20000])
+        logger.info("Debug saved: %s", path)
+    except Exception:
+        pass
+
+
+def _save_screenshot(driver: webdriver.Chrome, name: str) -> None:
+    debug_dir = os.path.join(BASE_DIR, "debug_screenshots")
+    os.makedirs(debug_dir, exist_ok=True)
+    path = os.path.join(debug_dir, f"{name}.png")
+    try:
+        driver.save_screenshot(path)
+        logger.info("Screenshot: %s", path)
+    except Exception:
+        pass
+
+
+# ── Chrome driver ────────────────────────────────────────────────────────────
+
+def _build_driver(profile: DeviceProfile,
+                  headless: bool = True) -> webdriver.Chrome:
+    """Build a Chrome WebDriver simulating Pixel 10 Pro."""
     options = Options()
 
-    if config.HEADLESS:
+    if headless:
         options.add_argument("--headless=new")
 
     options.add_argument("--no-sandbox")
@@ -44,241 +86,518 @@ def _build_driver(profile: DeviceProfile) -> webdriver.Chrome:
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-notifications")
-    options.add_argument("--window-size=390,844")  # Pixel 10 Pro screen size
+    options.add_argument("--window-size=390,844")
     options.add_argument(f"--user-agent={profile.user_agent}")
 
-    # Mobile emulation – Pixel 10 Pro viewport
     mobile_emulation = {
         "deviceMetrics": {"width": 390, "height": 844, "pixelRatio": 3.0},
         "userAgent": profile.user_agent,
     }
     options.add_experimental_option("mobileEmulation", mobile_emulation)
-
-    # Suppress automation flags
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--disable-blink-features=AutomationControlled")
 
-    service = Service()  # relies on chromedriver being on PATH (Replit provides it)
-    driver = webdriver.Chrome(service=service, options=options)
-    driver.implicitly_wait(config.IMPLICIT_WAIT)
-    driver.set_page_load_timeout(config.PAGE_LOAD_TIMEOUT)
+    driver = webdriver.Chrome(service=Service(), options=options)
+    driver.implicitly_wait(10)
+    driver.set_page_load_timeout(60)
     return driver
 
 
-# ── Login helper ──────────────────────────────────────────────────────────────
+# ── Cookie management ────────────────────────────────────────────────────────
 
-def _wait_for(driver: webdriver.Chrome, by: str, value: str,
-               timeout: int = config.WEBDRIVER_TIMEOUT) -> object:
-    """Return element after waiting for it to be clickable."""
-    return WebDriverWait(driver, timeout).until(
-        EC.element_to_be_clickable((by, value))
-    )
+def _cookies_path(chat_id: int) -> str:
+    os.makedirs(COOKIES_DIR, exist_ok=True)
+    return os.path.join(COOKIES_DIR, f"{chat_id}.json")
 
 
-def _gmail_login(driver: webdriver.Chrome, email: str, password: str) -> bool:
-    """
-    Perform Gmail / Google account login.
+def _save_cookies(driver: webdriver.Chrome, chat_id: int) -> None:
+    """Save browser cookies to a JSON file."""
+    cookies = driver.get_cookies()
+    path = _cookies_path(chat_id)
+    with open(path, "w") as f:
+        json.dump(cookies, f)
+    logger.info("Saved %d cookies to %s", len(cookies), path)
 
-    Returns True on apparent success, False on detectable failure.
-    """
+
+def _load_cookies(driver: webdriver.Chrome, chat_id: int) -> bool:
+    """Load saved cookies into the browser."""
+    path = _cookies_path(chat_id)
+    if not os.path.exists(path):
+        return False
+
     try:
-        driver.get(config.GMAIL_LOGIN_URL)
+        with open(path) as f:
+            cookies = json.load(f)
+
+        # First navigate to the domain so cookies can be set
+        driver.get("https://one.google.com/")
         time.sleep(2)
 
-        # ── Email step ────────────────────────────────────────────────────────
-        email_field = _wait_for(driver, By.CSS_SELECTOR,
-                                'input[type="email"]')
-        email_field.clear()
-        email_field.send_keys(email)
+        for cookie in cookies:
+            # Remove problematic fields
+            for key in ["sameSite", "expiry", "httpOnly", "secure"]:
+                cookie.pop(key, None)
+            try:
+                driver.add_cookie(cookie)
+            except Exception:
+                pass
 
-        next_btn = _wait_for(driver, By.ID, "identifierNext")
-        next_btn.click()
-        time.sleep(2)
+        logger.info("Loaded %d cookies from %s", len(cookies), path)
+        return True
 
-        # ── Password step ─────────────────────────────────────────────────────
-        password_field = _wait_for(driver, By.CSS_SELECTOR,
-                                   'input[type="password"]')
-        password_field.clear()
-        password_field.send_keys(password)
+    except Exception as exc:
+        logger.warning("Failed to load cookies: %s", exc)
+        return False
 
-        pw_next = _wait_for(driver, By.ID, "passwordNext")
-        pw_next.click()
-        time.sleep(3)
 
-        # ── Verify login ──────────────────────────────────────────────────────
-        current_url = driver.current_url
-        parsed = urlparse(current_url)
-        hostname = parsed.hostname or ""
-        path = parsed.path or ""
-        if (
-            hostname == "myaccount.google.com"
-            or hostname.endswith(".google.com")
-            and "/u/" in path
-        ):
-            logger.info("Login succeeded for %s", email)
-            return True
+def _cookies_to_requests(chat_id: int) -> Optional[requests.Session]:
+    """Create a requests.Session from saved cookies."""
+    path = _cookies_path(chat_id)
+    if not os.path.exists(path):
+        return None
 
-        # Check for error messages
-        try:
-            error_el = driver.find_element(
-                By.CSS_SELECTOR, '[jsname="B34EJ"], [aria-live="assertive"]'
+    try:
+        with open(path) as f:
+            cookies = json.load(f)
+
+        session = requests.Session()
+        for cookie in cookies:
+            session.cookies.set(
+                cookie["name"],
+                cookie["value"],
+                domain=cookie.get("domain", ".google.com"),
             )
-            if error_el.text:
-                logger.warning("Login error detected: %s", error_el.text)
-                return False
-        except NoSuchElementException:
-            pass
 
-        # If we're no longer on the login page, assume success
-        if not (
-            hostname == "accounts.google.com"
-            and path.startswith("/signin")
-        ):
-            logger.info("Login appeared successful for %s (URL: %s)",
-                        email, current_url)
-            return True
+        logger.info("Created requests session with %d cookies", len(cookies))
+        return session
 
-        logger.warning("Unexpected URL after login: %s", current_url)
-        return False
-
-    except TimeoutException as exc:
-        logger.error("Timeout during login: %s", exc)
-        return False
-    except WebDriverException as exc:
-        logger.error("WebDriver error during login: %s", exc)
-        return False
+    except Exception as exc:
+        logger.warning("Failed to create session from cookies: %s", exc)
+        return None
 
 
-# ── Offer detection ───────────────────────────────────────────────────────────
+# ── Offer detection ──────────────────────────────────────────────────────────
 
-def _extract_payment_link(driver: webdriver.Chrome) -> Optional[str]:
-    """
-    Scan the current page for a Gemini Pro offer / activation link.
+OFFER_URL_PATTERN = re.compile(
+    r'https?://one\.google\.com/offer/([A-Za-z0-9_-]+)',
+    re.IGNORECASE,
+)
 
-    Strategy:
-    1. Look for anchor tags whose text or aria-label contains offer keywords.
-    2. Fall back to scanning all links for 'gemini' or 'upgrade' patterns.
-    3. Return the first matching href found.
-    """
-    keywords = config.GEMINI_OFFER_KEYWORDS
+GENERIC_SLUGS = {"freetrial", "free-trial", "trial", "upgrade",
+                 "plans", "about", "home", "benefits"}
 
-    # -- Strategy 1: anchor text / aria-label match ---------------------------
-    all_links = driver.find_elements(By.TAG_NAME, "a")
-    for link in all_links:
-        try:
-            text = (link.text + " " + link.get_attribute("aria-label")).lower()
-            href = link.get_attribute("href") or ""
-            if any(kw in text for kw in keywords) and href:
-                logger.info("Found offer link via text match: %s", href)
-                return href
-        except Exception:
+# Pages to scan for the offer
+SCAN_URLS = [
+    "https://one.google.com/",
+    "https://one.google.com/home",
+    "https://one.google.com/settings",
+    "https://one.google.com/benefits",
+    "https://one.google.com/explore-plan/gemini-advanced",
+    "https://one.google.com/about/plans",
+]
+
+
+def _find_offer_in_html(html: str, page_url: str) -> Optional[str]:
+    """Scan HTML for unique Pixel offer URL (one.google.com/offer/CODE)."""
+    matches = OFFER_URL_PATTERN.findall(html)
+    if not matches:
+        return None
+
+    candidates = []
+    seen = set()
+
+    for code in matches:
+        if code in seen:
             continue
+        seen.add(code)
 
-    # -- Strategy 2: URL pattern scan -----------------------------------------
-    url_patterns = re.compile(
-        r"(gemini|upgrade|activate|offer|redeem|trial|checkout)",
-        re.IGNORECASE,
-    )
-    for link in all_links:
-        try:
-            href = link.get_attribute("href") or ""
-            if url_patterns.search(href):
-                logger.info("Found offer link via URL pattern: %s", href)
-                return href
-        except Exception:
-            continue
+        url = f"https://one.google.com/offer/{code}"
 
-    # -- Strategy 3: button / CTA elements ------------------------------------
-    buttons = driver.find_elements(By.CSS_SELECTOR, "button, [role='button']")
-    for btn in buttons:
-        try:
-            text = btn.text.lower()
-            if any(kw in text for kw in keywords):
-                # Try to find parent anchor
-                try:
-                    parent_link = btn.find_element(By.XPATH, "ancestor::a")
-                    href = parent_link.get_attribute("href") or ""
-                    if href:
-                        logger.info("Found offer link via button parent: %s", href)
-                        return href
-                except NoSuchElementException:
-                    pass
-                # Return current URL as fallback (user will land on offer page)
-                logger.info("Found offer CTA button on page: %s", driver.current_url)
-                return driver.current_url
-        except Exception:
-            continue
+        if code.lower() in GENERIC_SLUGS:
+            score = 5
+            is_pixel = False
+        elif len(code) >= 8 and code.replace("-", "").replace("_", "").isalnum():
+            score = 50
+            is_pixel = True
+            logger.info("🎯 Found UNIQUE Pixel offer: %s", url)
+        else:
+            score = 15
+            is_pixel = len(code) > 5
+
+        candidates.append({"url": url, "code": code,
+                           "score": score, "is_pixel": is_pixel})
+
+    if candidates:
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        for i, c in enumerate(candidates[:5]):
+            logger.info("  Offer #%d [score=%d] %s", i + 1, c["score"], c["url"])
+
+        pixel = [c for c in candidates if c["is_pixel"]]
+        if pixel:
+            return pixel[0]["url"]
+        return candidates[0]["url"]
 
     return None
 
 
-def _navigate_google_one(driver: webdriver.Chrome) -> Optional[str]:
-    """
-    Navigate to Google One and attempt to find the Gemini Pro offer link.
+def _scan_with_requests(session: requests.Session,
+                        device: DeviceProfile) -> Optional[str]:
+    """Scan Google One pages using HTTP requests (fast, no browser)."""
+    session.headers.update({
+        "User-Agent": device.user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
 
-    Returns the payment/activation URL or None if not found.
-    """
-    for url in (config.GOOGLE_ONE_URL, config.GOOGLE_ONE_OFFERS_URL):
+    for i, url in enumerate(SCAN_URLS):
         try:
-            logger.info("Navigating to %s", url)
-            driver.get(url)
-            time.sleep(3)
+            logger.info("Scanning %d/%d: %s", i + 1, len(SCAN_URLS), url)
+            resp = session.get(url, allow_redirects=True, timeout=30)
+            logger.info("  → Status: %d, URL: %s", resp.status_code, resp.url)
 
-            # Dismiss cookie/consent banners if present
-            for selector in (
-                '[aria-label="Accept all"]',
-                'button[jsname="higCR"]',
-                '[data-action="accept"]',
-            ):
+            # Check if redirected to login
+            if "accounts.google.com" in resp.url:
+                logger.warning("  → Redirected to login (cookies expired)")
+                return None
+
+            _save_debug(f"scan_{i + 1}", f"URL: {resp.url}\n\n{resp.text}")
+
+            offer = _find_offer_in_html(resp.text, resp.url)
+            if offer:
+                return offer
+
+        except Exception as exc:
+            logger.warning("Error scanning %s: %s", url, exc)
+
+    return None
+
+
+def _scan_with_selenium(driver: webdriver.Chrome) -> Optional[str]:
+    """Scan Google One pages using Selenium (slower but handles JS)."""
+    for i, url in enumerate(SCAN_URLS):
+        try:
+            logger.info("Browser scan %d/%d: %s", i + 1, len(SCAN_URLS), url)
+            driver.get(url)
+            time.sleep(4)
+
+            _save_screenshot(driver, f"scan_{i + 1}")
+
+            # Dismiss consent banners
+            for sel in ('[aria-label="Accept all"]', 'button[jsname="higCR"]'):
                 try:
-                    btn = driver.find_element(By.CSS_SELECTOR, selector)
-                    btn.click()
+                    driver.find_element(By.CSS_SELECTOR, sel).click()
                     time.sleep(1)
                     break
                 except NoSuchElementException:
                     pass
 
-            link = _extract_payment_link(driver)
-            if link:
-                return link
+            # Scroll to load content
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2)")
+            time.sleep(2)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(2)
 
-        except (TimeoutException, WebDriverException) as exc:
-            logger.warning("Error accessing %s: %s", url, exc)
+            # Check page source for offer URLs
+            offer = _find_offer_in_html(driver.page_source, driver.current_url)
+            if offer:
+                return offer
+
+            # Also check all links on the page
+            links = driver.find_elements(By.TAG_NAME, "a")
+            for link in links:
+                try:
+                    href = link.get_attribute("href") or ""
+                    match = OFFER_URL_PATTERN.search(href)
+                    if match:
+                        code = match.group(1)
+                        if code.lower() not in GENERIC_SLUGS and len(code) >= 8:
+                            logger.info("🎯 Found Pixel offer link: %s", href)
+                            return href
+                except Exception:
+                    continue
+
+        except Exception as exc:
+            logger.warning("Browser error on %s: %s", url, exc)
 
     return None
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────────────
 
 class GoogleAutomationError(Exception):
     """Raised when automation encounters an unrecoverable error."""
 
 
-def check_gemini_offer(email: str, password: str,
-                       device: DeviceProfile) -> Optional[str]:
+def setup_trusted_device(email: str, password: str,
+                         device: DeviceProfile,
+                         totp_secret: Optional[str] = None,
+                         chat_id: Optional[int] = None) -> bool:
     """
-    Main entry point.
-
-    Logs into *email* / *password* using the supplied *device* profile,
-    navigates to Google One, and returns the Gemini Pro offer link (or None).
-
-    Raises :class:`GoogleAutomationError` if the driver cannot be started or
-    the login step fails with an error.
+    Open a VISIBLE Chrome window for the user to manually log in.
+    Saves cookies for future automated use.
+    
+    The user must complete any Google verification (SMS, CAPTCHA) manually.
+    After login, cookies are saved so /check_offer can work without login.
     """
-    driver: Optional[webdriver.Chrome] = None
+    driver = None
     try:
-        logger.info("Starting WebDriver for session %s", device.session_id)
-        driver = _build_driver(device)
+        logger.info("Opening visible Chrome for manual login...")
+        driver = _build_driver(device, headless=False)
 
-        logged_in = _gmail_login(driver, email, password)
-        if not logged_in:
+        # Go to Google One (which will redirect to login)
+        driver.get("https://one.google.com/")
+        time.sleep(3)
+
+        # Auto-fill email if on login page
+        if "accounts.google.com" in driver.current_url:
+            try:
+                email_field = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable(
+                        (By.CSS_SELECTOR, 'input[type="email"], input[name="identifier"]'))
+                )
+                email_field.clear()
+                email_field.send_keys(email)
+
+                next_btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "#identifierNext"))
+                )
+                next_btn.click()
+                time.sleep(3)
+            except TimeoutException:
+                pass
+
+            # Auto-fill password
+            try:
+                pw_field = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable(
+                        (By.CSS_SELECTOR, 'input[type="password"]'))
+                )
+                pw_field.clear()
+                pw_field.send_keys(password)
+
+                pw_next = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "#passwordNext"))
+                )
+                pw_next.click()
+                time.sleep(3)
+            except TimeoutException:
+                pass
+
+            # Auto-fill TOTP
+            if totp_secret:
+                try:
+                    totp = pyotp.TOTP(totp_secret)
+                    code = totp.now()
+
+                    # Look for TOTP input
+                    totp_selectors = [
+                        'input[name="totpPin"]',
+                        'input[type="tel"]',
+                        '#totpPin',
+                    ]
+                    for sel in totp_selectors:
+                        try:
+                            field = WebDriverWait(driver, 5).until(
+                                EC.element_to_be_clickable(
+                                    (By.CSS_SELECTOR, sel))
+                            )
+                            field.send_keys(code)
+                            logger.info("Auto-filled TOTP code")
+
+                            # Click next
+                            for btn_sel in ['#totpNext', 'button[type="submit"]']:
+                                try:
+                                    btn = driver.find_element(By.CSS_SELECTOR, btn_sel)
+                                    btn.click()
+                                    time.sleep(3)
+                                    break
+                                except NoSuchElementException:
+                                    continue
+                            break
+                        except TimeoutException:
+                            continue
+                except Exception:
+                    pass
+
+        # Wait for user to complete login (up to 3 minutes)
+        logger.info("Waiting for user to complete login...")
+        for _ in range(36):  # 36 * 5 = 180 seconds
+            time.sleep(5)
+            try:
+                current = driver.current_url
+                host = urlparse(current).hostname or ""
+
+                if host in ("one.google.com", "myaccount.google.com"):
+                    path = urlparse(current).path or ""
+                    if "signin" not in path and "challenge" not in path:
+                        logger.info("✅ Login successful! URL: %s", current)
+
+                        # Navigate to Google One to get all cookies
+                        driver.get("https://one.google.com/")
+                        time.sleep(3)
+
+                        # Save cookies
+                        if chat_id:
+                            _save_cookies(driver, chat_id)
+
+                        return True
+            except Exception:
+                pass
+
+        logger.warning("Login timeout.")
+        return False
+
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def check_gemini_offer(email: str, password: str,
+                       device: DeviceProfile,
+                       totp_secret: Optional[str] = None,
+                       chat_id: Optional[int] = None) -> Optional[str]:
+    """
+    Check for the free Pixel Gemini Pro offer.
+
+    Strategy:
+    1. Use saved cookies with requests (fast, no browser)
+    2. Use saved cookies with Selenium (handles JS)
+    3. Fall back to full login
+    """
+    # ── Strategy 1: Fast scan with saved cookies (requests) ──────────────
+    if chat_id:
+        session = _cookies_to_requests(chat_id)
+        if session:
+            logger.info("=== Strategy 1: requests + saved cookies ===")
+            offer = _scan_with_requests(session, device)
+            if offer:
+                return offer
+            logger.info("Requests scan found no offer, trying Selenium...")
+
+    # ── Strategy 2: Selenium with saved cookies ──────────────────────────
+    driver = None
+    try:
+        logger.info("=== Strategy 2: Selenium + saved cookies ===")
+        driver = _build_driver(device, headless=True)
+
+        if chat_id and _load_cookies(driver, chat_id):
+            # Verify we're logged in
+            driver.get("https://one.google.com/")
+            time.sleep(4)
+
+            host = urlparse(driver.current_url).hostname or ""
+            if host == "one.google.com":
+                logger.info("✅ Logged in via saved cookies!")
+                offer = _scan_with_selenium(driver)
+                if offer:
+                    return offer
+            else:
+                logger.info("Cookies expired, redirected to: %s",
+                            driver.current_url)
+
+        # ── Strategy 3: Full automated login ─────────────────────────────
+        logger.info("=== Strategy 3: Full automated login ===")
+        driver.get(config.GMAIL_LOGIN_URL)
+        time.sleep(3)
+        _save_screenshot(driver, "login_page")
+
+        # Email
+        try:
+            email_field = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR,
+                     'input[type="email"], input[name="identifier"]'))
+            )
+            email_field.send_keys(email)
+            driver.find_element(By.CSS_SELECTOR, "#identifierNext").click()
+            time.sleep(3)
+        except TimeoutException:
+            # May be a "Verify" page — try clicking Next
+            try:
+                btn = driver.find_element(
+                    By.CSS_SELECTOR, 'button[jsname="LgbsSe"]')
+                btn.click()
+                time.sleep(3)
+            except NoSuchElementException:
+                pass
+
+        _save_screenshot(driver, "after_email")
+
+        # Password
+        try:
+            pw_field = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, 'input[type="password"]'))
+            )
+            pw_field.send_keys(password)
+            driver.find_element(By.CSS_SELECTOR, "#passwordNext").click()
+            time.sleep(3)
+        except TimeoutException:
+            _save_screenshot(driver, "no_password")
             raise GoogleAutomationError(
-                "Login failed – please check your credentials."
+                "Google is blocking automated login (CAPTCHA/challenge).\n\n"
+                "💡 Run /setup first to manually log in.\n"
+                "After that, /check_offer will use saved cookies."
             )
 
-        offer_link = _navigate_google_one(driver)
-        return offer_link
+        _save_screenshot(driver, "after_password")
+
+        # TOTP 2FA
+        if totp_secret:
+            try:
+                totp = pyotp.TOTP(totp_secret)
+                code = totp.now()
+
+                for sel in ['input[name="totpPin"]', 'input[type="tel"]']:
+                    try:
+                        field = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                        )
+                        field.send_keys(code)
+
+                        for btn_sel in ['#totpNext', 'button[type="submit"]']:
+                            try:
+                                driver.find_element(By.CSS_SELECTOR, btn_sel).click()
+                                break
+                            except NoSuchElementException:
+                                continue
+                        time.sleep(4)
+                        break
+                    except TimeoutException:
+                        continue
+            except Exception:
+                pass
+
+        _save_screenshot(driver, "after_login")
+
+        # Check if login succeeded
+        host = urlparse(driver.current_url).hostname or ""
+        if "accounts.google.com" in driver.current_url:
+            _save_screenshot(driver, "login_blocked")
+            raise GoogleAutomationError(
+                "Login blocked by Google security.\n\n"
+                "💡 Run /setup first to manually log in.\n"
+                "After that, /check_offer will use saved cookies."
+            )
+
+        # Save cookies for next time
+        if chat_id:
+            _save_cookies(driver, chat_id)
+
+        # Scan for offers
+        offer = _scan_with_selenium(driver)
+        if offer:
+            return offer
+
+        raise GoogleAutomationError(
+            "Logged in but no Pixel offer found.\n\n"
+            "The offer may not be available for this account, "
+            "or it may require the Google One Android app."
+        )
 
     finally:
         if driver:

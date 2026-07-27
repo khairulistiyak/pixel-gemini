@@ -7,3 +7,7 @@ dist/
 build/
 .venv/
 venv/
+debug_screenshots/
+debug_logs/
+chrome_profiles/
+saved_cookies/
