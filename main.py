@@ -44,7 +44,13 @@ AWAIT_EMAIL, AWAIT_PASSWORD, AWAIT_2FA = range(3)
 def _get_session(chat_id: int) -> dict:
     """Return (creating if absent) the session dict for *chat_id*."""
     if chat_id not in config.SESSION_STORE:
-        config.SESSION_STORE[chat_id] = {}
+        config.SESSION_STORE[chat_id] = {
+            "email": config.DEFAULT_EMAIL,
+            "password": config.DEFAULT_PASSWORD,
+            "totp_secret": config.DEFAULT_TOTP_SECRET,
+            "device": create_device_profile(chat_id),
+            "offer_link": None
+        }
     return config.SESSION_STORE[chat_id]
 
 
@@ -400,7 +406,15 @@ def main() -> None:
         )
         sys.exit(1)
 
-    app = Application.builder().token(token).build()
+    app = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .build()
+    )
 
     # /login conversation
     login_conv = ConversationHandler(
