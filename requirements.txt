@@ -2,7 +2,8 @@
 python-telegram-bot==21.3
 
 # Browser automation (for login only)
-selenium==4.21.0
+uiautomator2>=3.2.0
+adbutils>=2.6.0
 
 # HTTP requests (for offer scanning)
 requests>=2.31.0
