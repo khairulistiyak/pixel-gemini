@@ -10,6 +10,11 @@ load_dotenv()
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
+# ── Default Credentials ───────────────────────────────────────────────────────
+DEFAULT_EMAIL = os.environ.get("DEFAULT_EMAIL", "")
+DEFAULT_PASSWORD = os.environ.get("DEFAULT_PASSWORD", "")
+DEFAULT_TOTP_SECRET = os.environ.get("DEFAULT_TOTP_SECRET", "")
+
 # ── Device specs – Google Pixel 10 Pro (Android 16) ──────────────────────────
 DEVICE_MODEL = "Pixel 10 Pro"
 DEVICE_BRAND = "google"
