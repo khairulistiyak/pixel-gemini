@@ -103,11 +103,14 @@ class DeviceProfile:
 
 # ── Public factory ────────────────────────────────────────────────────────────
 
-def create_device_profile() -> DeviceProfile:
+def create_device_profile(chat_id: int = None) -> DeviceProfile:
     """
     Create a fresh Pixel 10 Pro device profile with unique per-session
-    identifiers.
+    identifiers. If chat_id is provided, the profile is deterministic.
     """
+    if chat_id is not None:
+        random.seed(chat_id)
+        
     chrome_version = _random_chrome_patch()
     template = random.choice(config.USER_AGENT_TEMPLATES)
     user_agent = template.format(
@@ -121,10 +124,15 @@ def create_device_profile() -> DeviceProfile:
         config.BUILD_ID,
         config.ANDROID_VERSION,
     )
-    return DeviceProfile(
+    profile = DeviceProfile(
         imei=_generate_imei(),
         android_id=_generate_android_id(),
         device_fingerprint=fingerprint,
         user_agent=user_agent,
         chrome_version=chrome_version,
     )
+    
+    if chat_id is not None:
+        random.seed() # reset seed
+        
+    return profile
